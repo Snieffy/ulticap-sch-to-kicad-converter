@@ -235,7 +235,6 @@ python kiuc_refdes_gui.py
 ![Refdes Reannotate](assets/Refdes-reannotate.png)
 
 ---
-![KiCad](assets/Kicad.png)
 
 ## Conversion Limitations
 
