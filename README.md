@@ -8,7 +8,7 @@ This is an independent, open-source project and is not affiliated with, sponsore
 [KiCad](https://www.kicad.org/) is a free software suite for electronic design automation.\
 This tool is provided "as-is" for file migration purposes only.
 
-KIUC converts Ulticap ASCII schematic files (`.SCH` / `.BLK`) to KiCad 9 schematic format (`.kicad_sch`).
+KIUC converts Ulticap ASCII schematic files (`.SCH` / `.BLK`) to KiCad 9 schematic format (`.kicad_sch`).\
 It is the schematic counterpart to [KIUB](https://github.com/Snieffy/ultiboard-ddf-to-kicad-converter),
 which converts Ultiboard layout files to KiCad PCB format.
 
