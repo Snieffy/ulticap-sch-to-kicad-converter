@@ -1558,13 +1558,14 @@ def _run_qt(sheet: Optional[Sheet], initial_dir: Path, initial_path: Optional[Pa
         QLabel, QFileDialog, QMessageBox, QFrame, QSizePolicy,
         QDialog, QPlainTextEdit, QToolBar, QDoubleSpinBox, QSpinBox, QMenu,
         QTreeWidget, QTreeWidgetItem, QProgressDialog, QTabWidget, QLineEdit,
+        QListWidget, QListWidgetItem,
     )
     from PySide6.QtGui import (
         QPainter, QPen, QColor, QFont, QFontMetricsF,
         QPolygonF, QTransform, QImage, QIcon, QPixmap, QAction,
         QPdfWriter,
     )
-    from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, QSize, QMarginsF
+    from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, QSize, QMarginsF, QPoint, QRect, QEvent
 
     BG   = QColor(_BG_HEX)
     WIRE = QColor(_COL_WIRE)
@@ -1988,6 +1989,13 @@ def _run_qt(sheet: Optional[Sheet], initial_dir: Path, initial_path: Optional[Pa
                     else:
                         cx, cy = comp.x, comp.y
                     hits.append((label, 'component', comp, cx, cy, extent))
+            # Ascending, natural order (C1, C2, ... C10 rather than the
+            # lexicographic C1, C10, C2) -- same key _populate_refdes uses
+            # for the Refdes panel, applied here to the full display label
+            # so it sorts on refdes first for components (its own natural
+            # prefix) while still giving labels/annotations a sensible
+            # order among themselves.
+            hits.sort(key=lambda h: _natural_sort_key(h[0]))
             return hits
 
         def enterEvent(self, e):
@@ -3733,14 +3741,168 @@ def _run_qt(sheet: Optional[Sheet], initial_dir: Path, initial_path: Optional[Pa
                 'Find text among *X labels, *A annotations, and component\n'
                 'refdes/attribute values (VALUE, DEVICE, PKG_TYPE, WIRELABEL,\n'
                 'custom *C tags — not pin numbers). Case-insensitive\n'
-                'substring match. Press Enter, or click outside the field:\n'
-                'a single match zooms straight to it (same framing as the\n'
-                'Components/Signals panels); multiple matches show a\n'
-                'pulldown to choose which one.')
-            # editingFinished fires both on Enter and on focus-out, which is
-            # exactly "Enter is hit or clicked outside the field" in one signal.
+                'substring match. Matches appear in a dropdown as you type,\n'
+                'sorted by reference. Step through them with the Down/Up\n'
+                'arrows or the mouse wheel (each one zooms/highlights as you\n'
+                'go); press Enter to jump to the highlighted match and close\n'
+                'the list, or click a match directly. Click the field again,\n'
+                'or click elsewhere, to reopen or close the list.')
+
+            # Live popup: a small floating QListWidget positioned under the
+            # field, rebuilt on every keystroke. Qt.Tool + FramelessWindowHint
+            # + WA_ShowWithoutActivating keep it from ever taking keyboard
+            # focus away from the line edit (unlike a QMenu, which grabs
+            # keyboard input the moment it's shown) -- the whole point is to
+            # let the user keep typing while the list updates underneath,
+            # rather than the field losing focus/closing on every character.
+            self._search_popup = QListWidget(self)
+            self._search_popup.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
+            self._search_popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
+            self._search_popup.setFocusPolicy(Qt.NoFocus)
+            self._search_popup.itemClicked.connect(self._on_search_popup_item_clicked)
+            # Keyboard/wheel navigation (see eventFilter) moves the current
+            # row via setCurrentRow rather than calling _go_to_search_hit
+            # directly, so a click and an arrow-key/wheel step both zoom
+            # through this single path.
+            self._search_popup.currentRowChanged.connect(self._on_search_popup_row_changed)
+
+            self._search_edit.textChanged.connect(self._update_search_popup)
+            # Application-wide, not just on the field: a wheel event over
+            # the popup itself (very natural, since it sits right under the
+            # field) needs to reach us too instead of falling through to the
+            # list's own native scrolling, and a click that should close the
+            # popup can land on any other widget entirely (the canvas, a
+            # menu, ...), not just ones filtered directly.
+            QApplication.instance().installEventFilter(self)
+            # editingFinished fires on Enter or focus-out; with the popup
+            # covering the "pick one of several" case, this is left only to
+            # handle the single-match / no-match cases (see
+            # _on_search_activated).
             self._search_edit.editingFinished.connect(self._on_search_activated)
             tb.addWidget(self._search_edit)
+
+        def eventFilter(self, obj, event):
+            etype = event.type()
+
+            # Close the popup on a click anywhere outside it and outside the
+            # Find field -- checked first, ahead of the object-specific
+            # branches below, since the click that should close it is most
+            # often on some unrelated widget (the canvas, a menu, ...) that
+            # none of those branches would otherwise ever see.
+            if etype == QEvent.MouseButtonPress and self._search_popup.isVisible():
+                gp = event.globalPosition().toPoint()
+                edit_rect = QRect(self._search_edit.mapToGlobal(QPoint(0, 0)),
+                                  self._search_edit.size())
+                if not self._search_popup.geometry().contains(gp) \
+                        and not edit_rect.contains(gp):
+                    self._search_popup.hide()
+
+            if obj is self._search_edit:
+                if etype == QEvent.MouseButtonPress:
+                    # Re-show the popup with whatever currently matches when
+                    # the user clicks back into a non-empty field -- the
+                    # popup is otherwise only driven by textChanged, which
+                    # doesn't fire again just because the field regains focus.
+                    if self._search_edit.text().strip():
+                        self._update_search_popup()
+                elif etype == QEvent.KeyPress:
+                    if event.key() == Qt.Key_Escape:
+                        self._search_popup.hide()
+                    elif event.key() in (Qt.Key_Return, Qt.Key_Enter) \
+                            and self._search_popup.isVisible() \
+                            and self._search_popup.currentRow() >= 0:
+                        # Jump to the highlighted row and close, same as a
+                        # click -- it's already been zoomed/highlighted live
+                        # as the user arrowed/scrolled to it (currentRowChanged),
+                        # so only closing the popup is left to do. Consumed
+                        # (return True) so this doesn't also fire
+                        # editingFinished -> _on_search_activated for the same
+                        # keystroke. Falls through to that single-hit path
+                        # instead when nothing's been highlighted yet (e.g. the
+                        # popup just opened on exactly one match).
+                        self._on_search_popup_item_clicked(None)
+                        return True
+                    elif event.key() in (Qt.Key_Down, Qt.Key_Up) \
+                            and self._search_popup.isVisible() and self._search_popup.count():
+                        # Step through the still-open popup and zoom to each
+                        # in turn (via currentRowChanged), without leaving the
+                        # Find field or closing the list -- consumed (return
+                        # True) so the key doesn't also move the text cursor.
+                        self._move_search_selection(1 if event.key() == Qt.Key_Down else -1)
+                        return True
+
+            if etype == QEvent.Wheel and self._search_popup.isVisible() and self._search_popup.count() \
+                    and (obj is self._search_edit or obj is self._search_popup
+                         or (isinstance(obj, QWidget) and self._search_popup.isAncestorOf(obj))):
+                # angleDelta is the normal case (positive = wheel rotated up,
+                # i.e. Qt.Key_Up's direction); pixelDelta is the fallback for
+                # precision touchpads/trackpad drivers that report only a
+                # pixel delta and leave angleDelta at (0, 0) -- without this
+                # fallback, scrolling on such a device always took the "else"
+                # branch below regardless of direction, which read as
+                # "downwards works, upwards doesn't."
+                dy = event.angleDelta().y() or event.pixelDelta().y()
+                if dy:
+                    self._move_search_selection(-1 if dy > 0 else 1)
+                return True
+
+            return super().eventFilter(obj, event)
+
+        def _move_search_selection(self, delta):
+            """Move the popup's current row by delta (+1/-1), clamped to
+            the list's bounds (no wraparound), and let currentRowChanged
+            zoom/highlight the newly-current match. Shared by the arrow
+            keys and the mouse wheel."""
+            row = self._search_popup.currentRow()
+            row = 0 if row < 0 else max(0, min(self._search_popup.count() - 1, row + delta))
+            self._search_popup.setCurrentRow(row)
+
+        def _update_search_popup(self):
+            """Rebuild and (re)show the live match list under the Find
+            field from its current text. Hidden entirely for empty text or
+            zero matches -- a single match still gets a one-row list (the
+            user can click it, or just press Enter as before)."""
+            query = self._search_edit.text()
+            self._search_popup.hide()
+            if not query.strip():
+                return
+            hits = self._canvas._search_matches(query)
+            if not hits:
+                return
+            self._search_popup.clear()
+            for label, kind, obj, x, y, extent in hits:
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, (kind, obj, x, y, extent))
+                self._search_popup.addItem(item)
+
+            row_h = self._search_popup.sizeHintForRow(0)
+            visible_rows = min(len(hits), 8)
+            height = visible_rows * row_h + 4
+            pos = self._search_edit.mapToGlobal(QPoint(0, self._search_edit.height()))
+            self._search_popup.setGeometry(pos.x(), pos.y(),
+                                           self._search_edit.width(), height)
+            self._search_popup.show()
+
+        def _on_search_popup_item_clicked(self, _item):
+            # currentRowChanged has already zoomed/highlighted this row by
+            # the time itemClicked fires (Qt sets the current row on mouse
+            # press, before emitting clicked() on release) -- only closing
+            # the popup is left to do here.
+            self._search_popup.hide()
+
+        def _on_search_popup_row_changed(self, row):
+            """Zoom/highlight the newly-current popup row -- fired by both
+            arrow-key/wheel navigation (_move_search_selection) and by
+            clicking a row (QListWidget sets currentRow on click too, just
+            before itemClicked's own handler runs). row is -1 right after
+            .clear() in _update_search_popup, which is a no-op here."""
+            if row < 0:
+                return
+            item = self._search_popup.item(row)
+            if item is None:
+                return
+            kind, obj, x, y, extent = item.data(Qt.UserRole)
+            self._go_to_search_hit(kind, obj, x, y, extent)
 
         def _on_search_activated(self):
             query = self._search_edit.text()
@@ -3759,18 +3921,9 @@ def _run_qt(sheet: Optional[Sheet], initial_dir: Path, initial_path: Optional[Pa
             if len(hits) == 1:
                 _label, kind, obj, x, y, extent = hits[0]
                 self._go_to_search_hit(kind, obj, x, y, extent)
-                return
-            # Multiple matches: a bbox fit across all of them tends to just
-            # zoom out to the whole sheet when hits are scattered, so offer
-            # a pulldown instead -- same picker-menu idiom the canvas
-            # already uses for ambiguous overlapping component clicks.
-            menu = QMenu(self)
-            for label, kind, obj, x, y, extent in hits:
-                act = menu.addAction(label)
-                act.triggered.connect(
-                    lambda _checked, k=kind, o=obj, xx=x, yy=y, ee=extent:
-                        self._go_to_search_hit(k, o, xx, yy, ee))
-            menu.exec(self._search_edit.mapToGlobal(self._search_edit.rect().bottomLeft()))
+                self._search_popup.hide()
+            # More than one hit: leave it to the live popup (already showing
+            # the choices) rather than popping a second, redundant menu here.
 
         def _go_to_search_hit(self, kind, obj, x, y, extent):
             """Select a Find match through the same click-to-inspect
