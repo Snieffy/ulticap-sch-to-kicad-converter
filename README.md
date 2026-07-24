@@ -94,13 +94,13 @@ Launch the converter GUI:
 python kiuc_gui.py
 ```
 
-**Input files**\
-Click **Add .SCH / .BLK** and select the main (parent) sheet of your design. For multi-sheet
-hierarchical designs, KIUC automatically discovers and adds every sub-sheet referenced from
-the selected file, recursively — no need to add child sheets by hand. If a referenced sub-sheet
-can't be found on disk, a warning is logged. Individual files can still be removed or reordered
-manually using the **Remove**, **Remove All**, **Move Up**, and **Move Down** buttons, e.g. when
-a design's sheets live across multiple folders. Block mode (`.BLK`) is never hierarchical, so
+**Input file**\
+Select the main (parent) `.SCH` sheet of your design in the **File** field, either by typing/pasting
+the path or via **Browse…**. For multi-sheet hierarchical designs, KIUC automatically discovers and
+loads every sub-sheet referenced from the selected file, recursively — no need to add child sheets
+by hand, and no way to accidentally mix sheets from a second, unrelated design into the same
+conversion. Each auto-loaded sub-sheet is reported in the log; if a referenced sub-sheet can't be
+found on disk, a warning is logged there too. Block mode (`.BLK`) is never hierarchical, so
 auto-discovery does not apply to it.
 
 **Output**\
