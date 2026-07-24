@@ -388,12 +388,17 @@ class App(tk.Tk):
         self.resizable(True, True)
         self.minsize(680, 560)
 
-        self._sch_files: list = []       # list of Path
+        self._sch_files: list = []       # list of Path: root + auto-discovered hierarchy
         self._last_output_sch: str = ''  # set after successful conversion
         self._kicad_exe: str = _load_kicad_exe()
 
         self._v5_var = tk.BooleanVar(value=False)
         self._last_dump_suffix: str = '_log'  # updated by each dump action
+
+        # Set while the reannotation-fix flow updates self._infile_var to
+        # reflect renamed files, so that update doesn't re-trigger discovery
+        # and re-log everything a second time. See _on_infile_changed.
+        self._suppress_infile_trace: bool = False
 
         # Apply any tuning values saved from a previous session. Names not
         # present in the ini (fresh install, or a tunable added since) are
@@ -403,7 +408,7 @@ class App(tk.Tk):
         self._build_ui()
 
         if initial_path:
-            self._add_paths([initial_path])
+            self._infile_var.set(str(initial_path))
 
         # Ask for KiCad path on first run (after window is visible)
         if not self._kicad_exe:
@@ -418,47 +423,37 @@ class App(tk.Tk):
         outer.rowconfigure(2, weight=1)  # log row expands
 
         # ── Input section ──────────────────────────────────────────────────────
-        frm_in = ttk.LabelFrame(outer, text=' Input .SCH / .BLK files ')
+        # Single file, like kiub_gui.py: sub-sheets of a hierarchical .SCH
+        # design are discovered and loaded automatically (see kiuc_ascii's
+        # collect_hierarchy_paths), so there is nothing left for the user to
+        # manually add/remove/reorder -- doing so only risked mixing sheets
+        # from two unrelated designs into a single, incorrectly-merged
+        # conversion. What was discovered, and any missing sub-sheet, is
+        # reported in the Log window below instead.
+        frm_in = ttk.LabelFrame(outer, text=' Input ')
         frm_in.grid(row=0, column=0, sticky='ew', pady=(0, 6))
-        frm_in.columnconfigure(0, weight=1)
+        frm_in.columnconfigure(1, weight=1)
 
-        ttk.Label(frm_in,
-                  text='Add the main sheet — sub-sheets load automatically '
-                       '(use Remove/Move to adjust manually):',
-                  font=('Segoe UI', 9)).grid(row=0, column=0, sticky='w',
-                                             padx=6, pady=(4, 0))
-
-        # Listbox + scrollbar
-        list_frame = ttk.Frame(frm_in)
-        list_frame.grid(row=1, column=0, sticky='ew', padx=6, pady=4)
-        list_frame.columnconfigure(0, weight=1)
-
-        self._listbox = tk.Listbox(list_frame, font=('Consolas', 9), height=5,
-                                   activestyle='none', selectmode='browse')
-        self._listbox.grid(row=0, column=0, sticky='ew')
-        sb = ttk.Scrollbar(list_frame, command=self._listbox.yview)
-        sb.grid(row=0, column=1, sticky='ns')
-        self._listbox.config(yscrollcommand=sb.set)
-
-        # List management buttons
-        btn_frame = ttk.Frame(frm_in)
-        btn_frame.grid(row=2, column=0, sticky='ew', padx=6, pady=(0, 4))
-
-        ttk.Button(btn_frame, text='Add .SCH / .BLK…',
-                   command=self._add_sch).pack(side='left', padx=(0, 4))
-        ttk.Button(btn_frame, text='Remove',
-                   command=self._remove_sch).pack(side='left', padx=(0, 4))
-        ttk.Button(btn_frame, text='Remove All',
-                   command=self._remove_all).pack(side='left', padx=(0, 4))
-        ttk.Button(btn_frame, text='Move Up',
-                   command=self._move_up).pack(side='left', padx=(0, 4))
-        ttk.Button(btn_frame, text='Move Down',
-                   command=self._move_down).pack(side='left', padx=(0, 12))
+        ttk.Label(frm_in, text='File:').grid(
+            row=0, column=0, sticky='w', padx=6, pady=4)
+        self._infile_var = tk.StringVar()
+        in_entry = ttk.Entry(frm_in, textvariable=self._infile_var,
+                             font=('Consolas', 9))
+        in_entry.grid(row=0, column=1, sticky='ew', padx=(0, 4), pady=4)
+        self._infile_var.trace_add('write', self._on_infile_changed)
+        ttk.Button(frm_in, text='Browse…',
+                   command=self._browse_infile).grid(row=0, column=2, padx=(0, 6), pady=4)
+        _ToolTip(in_entry,
+            'Select the main .SCH file of a hierarchical design, or a .BLK '
+            'block-library file.\n\n'
+            'Sub-sheets referenced by the main sheet are discovered and '
+            'loaded automatically -- see the Log window for what was found, '
+            'and for a warning if a referenced sub-sheet cannot be located.')
 
         # SCH V5.x toggle
-        v5_cb = ttk.Checkbutton(btn_frame, text='SCH V5.x',
+        v5_cb = ttk.Checkbutton(frm_in, text='SCH V5.x',
                                 variable=self._v5_var)
-        v5_cb.pack(side='left')
+        v5_cb.grid(row=1, column=0, columnspan=2, sticky='w', padx=6, pady=(0, 6))
         _ToolTip(v5_cb,
             'Enable when converting files created with Ulticap V5.x (Windows 95 version).\n\n'
             'V5.x files have arc encoding differences that require correction before\n'
@@ -579,45 +574,54 @@ class App(tk.Tk):
         has_blk = any(p.suffix.upper() == '.BLK' for p in self._sch_files)
         self._block_var.set(has_blk)
 
-    def _add_sch(self):
-        paths = filedialog.askopenfilenames(
-            title='Select .SCH file(s)',
+    def _browse_infile(self):
+        path = filedialog.askopenfilename(
+            title='Select .SCH or .BLK file',
             filetypes=[('Ulticap Schematic', '*.SCH *.sch *.BLK *.blk'), ('All files', '*.*')])
-        self._add_paths(paths)
+        if path:
+            self._infile_var.set(str(Path(path)))   # fires _on_infile_changed
 
-    def _add_paths(self, paths):
-        """Add each path to the input list (skipping ones already present)
-        and auto-discover the rest of its hierarchy, same as _add_sch --
-        factored out so both the file-dialog path and a pre-supplied path
-        (see __init__'s initial_path, used when launched from the viewer)
-        go through identical logic."""
-        added_any = False
-        for p in paths:
-            pth = Path(p)
-            if pth not in self._sch_files:
-                self._sch_files.append(pth)
-                self._listbox.insert('end', str(pth))
-                added_any = True
-            # Auto-load the rest of a hierarchical design (mirrors the
-            # viewer's automatic "Sheets" tree). Block libraries (.BLK)
-            # are never hierarchical, so discovery is skipped for them.
-            if pth.suffix.upper() == '.SCH':
-                for child in collect_hierarchy_paths(pth)[1:]:
-                    if child not in self._sch_files:
-                        self._sch_files.append(child)
-                        self._listbox.insert('end', str(child))
-                        self._log_write(f'Auto-loaded sub-sheet: {child.name}', 'info')
-                        added_any = True
+    def _on_infile_changed(self, *_args):
+        """Rebuild the internal file list (root + auto-discovered hierarchy)
+        whenever the input file changes, and log what was found. Replaces
+        the old manual Add/Remove/Move workflow -- discovery is automatic
+        and only a single design is ever loaded at a time, so there is
+        nothing left for the user to manage by hand.
+
+        Guarded by self._suppress_infile_trace so the reannotation-fix flow
+        (_check_refdes) can update the displayed path after writing renamed
+        files without re-running discovery/logging a second time.
+        """
+        if self._suppress_infile_trace:
+            return
+        infile = self._infile_var.get().strip()
+        if not infile:
+            self._sch_files = []
+            self._sync_block_mode()
+            self._clear_output_fields()
+            return
+        pth = Path(infile)
+        self._sch_files = [pth]
+        # Auto-load the rest of a hierarchical design (mirrors the
+        # viewer's automatic "Sheets" tree). Block libraries (.BLK) are
+        # never hierarchical, so discovery is skipped for them. Skipped
+        # entirely for a path that doesn't exist yet (e.g. mid-typing) --
+        # _validate() reports a missing file at Convert time instead.
+        if pth.exists() and pth.suffix.upper() == '.SCH':
+            for child in collect_hierarchy_paths(pth)[1:]:
+                if child not in self._sch_files:
+                    self._sch_files.append(child)
+                    self._log_write(f'Auto-loaded sub-sheet: {child.name}', 'info')
         self._sync_block_mode()
         self._autofill_output()
-        if added_any and not self._block_var.get():
+        if pth.exists() and not self._block_var.get():
             self._warn_missing_sheets()
 
     def _warn_missing_sheets(self):
         """Parse the currently listed sheets and log a warning for any
         sub-sheet FILE= reference that couldn't be resolved -- e.g. a file
         that was moved, renamed, or simply doesn't exist yet. Runs
-        immediately on Add/Remove so the gap is visible before Convert,
+        immediately on file selection so the gap is visible before Convert,
         in addition to the same check repeated at conversion time."""
         sheets = []
         for f in self._sch_files:
@@ -626,52 +630,9 @@ class App(tk.Tk):
         for w in check_missing_sheets(sheets):
             self._log_write(f'WARNING: {w}', 'warn')
 
-    def _remove_sch(self):
-        sel = self._listbox.curselection()
-        for i in reversed(sel):
-            self._listbox.delete(i)
-            self._sch_files.pop(i)
-        self._sync_block_mode()
-        if not self._sch_files:
-            self._clear_output_fields()
-        else:
-            self._autofill_output()
-            if not self._block_var.get():
-                self._warn_missing_sheets()
-
-    def _remove_all(self):
-        self._listbox.delete(0, 'end')
-        self._sch_files.clear()
-        self._sync_block_mode()
-        self._clear_output_fields()
-
     def _clear_output_fields(self):
         self._out_var.set('')
         self._name_var.set('')
-
-    def _move_up(self):
-        i = self._listbox.curselection()
-        if not i or i[0] == 0:
-            return
-        idx = i[0]
-        self._sch_files[idx-1], self._sch_files[idx] = \
-            self._sch_files[idx], self._sch_files[idx-1]
-        t = self._listbox.get(idx)
-        self._listbox.delete(idx)
-        self._listbox.insert(idx-1, t)
-        self._listbox.selection_set(idx-1)
-
-    def _move_down(self):
-        i = self._listbox.curselection()
-        if not i or i[0] >= self._listbox.size() - 1:
-            return
-        idx = i[0]
-        self._sch_files[idx], self._sch_files[idx+1] = \
-            self._sch_files[idx+1], self._sch_files[idx]
-        t = self._listbox.get(idx)
-        self._listbox.delete(idx)
-        self._listbox.insert(idx+1, t)
-        self._listbox.selection_set(idx+1)
 
     def _autofill_output(self):
         """Always fill output folder and base name from the first listed file."""
@@ -751,7 +712,11 @@ class App(tk.Tk):
 
     def _validate(self):
         if not self._sch_files:
-            messagebox.showwarning('No input', 'Please add at least one .SCH or .BLK file.')
+            messagebox.showwarning('No input', 'Please select a .SCH or .BLK file.')
+            return False
+        if not self._sch_files[0].exists():
+            messagebox.showwarning('File not found',
+                                   f'Input file not found:\n{self._sch_files[0]}')
             return False
         if not self._out_var.get():
             messagebox.showwarning('No output', 'Please select an output folder.')
@@ -873,15 +838,17 @@ class App(tk.Tk):
         elif ddf_path:
             self._log_write(f'WARNING: could not use DDF path: {ddf_path}', 'warn')
 
-        # Continue the conversion using the new, renamed files.
+        # Continue the conversion using the new, renamed files. The file
+        # list is already correct (reannotate_hierarchy wrote the full
+        # renamed hierarchy) -- only the displayed path needs updating, and
+        # without re-running discovery/logging a second time.
         self._sch_files = list(result.sch_files_written)
-        self._refresh_listbox()
+        self._suppress_infile_trace = True
+        try:
+            self._infile_var.set(str(self._sch_files[0]))
+        finally:
+            self._suppress_infile_trace = False
         return True
-
-    def _refresh_listbox(self):
-        self._listbox.delete(0, 'end')
-        for pth in self._sch_files:
-            self._listbox.insert('end', str(pth))
 
     def _run_dump(self):
         if not self._validate():

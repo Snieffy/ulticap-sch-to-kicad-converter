@@ -4397,9 +4397,10 @@ def _run_qt(sheet: Optional[Sheet], initial_dir: Path, initial_path: Optional[Pa
             separate process, pre-loaded with this design's ROOT sheet --
             not necessarily self._current_path, which may be a sub-sheet
             the user has navigated into (double-click, Sheets panel, Find).
-            kiuc_gui's own auto-hierarchy-discovery (see kiuc_gui._add_paths)
-            needs the parent to seed correctly, same as File > Open here
-            always re-roots the Sheets tree at the file it's given."""
+            kiuc_gui's own auto-hierarchy-discovery (see kiuc_gui's
+            _on_infile_changed) needs the parent to seed correctly, same as
+            File > Open here always re-roots the Sheets tree at the file
+            it's given."""
             if not self._canvas.sheet:
                 QMessageBox.information(self, 'KIUC GUI', 'No schematic loaded.'); return
             gui_script = Path(__file__).resolve().parent / 'kiuc_gui.py'
