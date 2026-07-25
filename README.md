@@ -1,5 +1,5 @@
 # Ulticap SCH to KiCad Converter (KIUC)
-**Python:** 3.9+ | **License:** GPLv3 | **Target:** KiCad 9
+**Python:** 3.9+ | **License:** GPLv3 | **Target:** KiCad V9+
 
 ><ins>**Legal Notice**</ins>\
 [KIUC](https://github.com/Snieffy/ulticap-sch-to-kicad-converter) is a functional acronym for <ins>**Ki**</ins>Cad <ins>**U**</ins>lti<ins>**C**</ins>ap Converter.\
